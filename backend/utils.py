@@ -145,7 +145,6 @@ def display_polydata(polydata_list=None, port_list=None):
         polydata_list = []
     renderer = vtk.vtkRenderer()
 
-
     # 遍历polydata_list中的每个PolyData
     for polydata in polydata_list:
         # 创建映射器，并设置PolyData作为输入
@@ -292,6 +291,34 @@ def select_polydata(polydata, line):
     return clip_filter
 
 
+def clip_vessel_with_line(vessel, line):
+    # 创建vtkImplicitSelectionLoop对象
+    implicit_line = vtk.vtkImplicitSelectionLoop()
+    implicit_line.SetLoop(line.GetPoints())
+
+    # 使用vtkExtractGeometry来切割vessel
+    extract = vtk.vtkExtractGeometry()
+    extract.SetInputData(vessel)
+    extract.SetImplicitFunction(implicit_line)
+    extract.ExtractInsideOn()
+    extract.ExtractBoundaryCellsOn()
+    extract.Update()
+
+    # 获取切割后的输出
+    clipped_vessel = extract.GetOutput()
+
+    return convert_to_polydata(clipped_vessel)
+
+
+def convert_to_polydata(grid):
+    # 创建vtkGeometryFilter以将vtkUnstructuredGrid转换为vtkPolyData
+    geometry_filter = vtk.vtkGeometryFilter()
+    geometry_filter.SetInputData(grid)
+    geometry_filter.Update()
+
+    # 返回转换后的vtkPolyData
+    return geometry_filter.GetOutput()
+
 def smooth_line(boundary_line=None):
     if boundary_line is None:
         return
@@ -313,7 +340,7 @@ def smooth_line(boundary_line=None):
             line_indices[str(point_index1)] = point_index2
     points = vtk.vtkPoints()
     last_index = 0
-    for i in range(boundary_line.GetNumberOfPoints()+1):
+    for i in range(boundary_line.GetNumberOfPoints() + 1):
         point = boundary_line.GetPoint(last_index)
         last_index = line_indices[str(last_index)]
         points.InsertNextPoint(point)
@@ -459,5 +486,122 @@ def polydata_to_string(polydata):
     return base64_encoded
 
 
+def clear_polys_in_line(surface_polydata, line_polydata):
+    # 获取表面模型的点和面片数据
+    surface_points = surface_polydata.GetPoints()
+    surface_polys = surface_polydata.GetPolys()
+
+    # 获取线模型的点数据
+    line_points = line_polydata.GetPoints()
+
+    # 创建一个新的vtkPolyData对象来存储结果
+    result_polydata = vtk.vtkPolyData()
+    result_points = vtk.vtkPoints()
+    result_cells = vtk.vtkCellArray()
+
+    result_points = surface_points
+
+    # 创建一个字典来存储线模型中的点的坐标，以便快速查找
+    line_points_dict = {}
+    for i in range(line_points.GetNumberOfPoints()):
+        point = line_points.GetPoint(i)
+        line_points_dict[point] = i
+
+
+    # 提取面片信息
+    num_cells = surface_polydata.GetNumberOfCells()
+
+    for i in range(num_cells):
+        cell = surface_polydata.GetCell(i)
+        points = cell.GetPoints()
+        point_ids = cell.GetPointIds()
+        poly_contains_only_line_points = True
+        for j in range(point_ids.GetNumberOfIds()):
+            point_id = point_ids.GetId(j)
+            point = points.GetPoint(j)
+            # 检查表面模型中的点是否在线模型中
+            if point not in line_points_dict:
+                poly_contains_only_line_points = False
+                break
+        if not poly_contains_only_line_points:
+            # 如果面片不仅由线模型中的点构成，则将其添加到新的PolyData对象中
+            # for j in range(cell_id.GetNumberOfIds()):
+            #     point_id = cell_id.GetId(j)
+            #     result_points.InsertNextPoint(surface_points.GetPoint(point_id))
+            result_cells.InsertNextCell(cell)
+
+    # 将结果点和面片设置给新的PolyData对象
+    result_polydata.SetPoints(result_points)
+    result_polydata.SetPolys(result_cells)
+
+    return result_polydata
+
+
+def object_to_list(obj):
+    if isinstance(obj, dict):
+        # 检查对象是否为字典
+        keys = obj.keys()  # 获取对象的所有键，并排序
+        return [obj[key] for key in keys]  # 使用列表推导式按照排序后的键顺序创建列表
+    else:
+        return None  # 如果对象不是字典，返回None或者其他你认为合适的值
+
+
+def create_vtk_polydata(tooth_point_values, tooth_cell_values):
+    # 创建一个空的vtkPoints对象来存储点数据
+    points = vtk.vtkPoints()
+
+    # 将一维数组转换为(n, 3)的数组，每行代表一个点的xyz坐标
+    num_points = len(tooth_point_values) // 3
+    reshaped_points = np.reshape(tooth_point_values, (num_points, 3))
+
+    # 添加点到vtkPoints对象
+    for i in range(num_points):
+        points.InsertNextPoint(reshaped_points[i])
+
+    # 创建一个空的vtkCellArray对象来存储单元格数据
+    cells = vtk.vtkCellArray()
+
+    # 遍历tooth_cell_values数组，每四个一组（一个面片），跳过第一个数字（总是3），后面三个是点索引
+    i = 0
+    while i < len(tooth_cell_values):
+        cells.InsertNextCell(3)  # 指定接下来的单元格由3个点构成
+        for j in range(1, 4):  # 跳过每组的第一个数字（3），只添加点索引
+            cells.InsertCellPoint(tooth_cell_values[i + j])
+        i += 4  # 移动到下一个单元格的开始位置
+
+    # 创建vtkPolyData对象
+    polydata = vtk.vtkPolyData()
+
+    # 将点和单元格数据设置到polydata对象
+    polydata.SetPoints(points)
+    polydata.SetPolys(cells)
+
+    return polydata
+
+
+def extract_point_and_cell_values(vtk_polydata):
+    point_data = vtk_polydata.GetPointData()
+    cell_data = vtk_polydata.GetCellData()
+
+    # 提取点数据的值
+    point_values = []
+    num_points = vtk_polydata.GetNumberOfPoints()
+    for i in range(num_points):
+        point = vtk_polydata.GetPoint(i)
+        point_values.extend(point)
+
+    # 提取单元数据的值
+    cell_values = []
+    num_cells = vtk_polydata.GetNumberOfCells()
+    for i in range(num_cells):
+        cell = vtk_polydata.GetCell(i)
+        num_points_in_cell = cell.GetNumberOfPoints()
+        cell_values.append(num_points_in_cell)
+        for j in range(num_points_in_cell):
+            cell_values.append(cell.GetPointId(j))
+
+    return point_values, cell_values
+
+
 if __name__ == '__main__':
-    test_select()
+    pass
